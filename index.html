@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#030c29">
+<meta name="color-scheme" content="dark">
+<title>Brika Camera</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<!-- 1. Setup: which panel, how big, what kind of photo -->
+<section id="setup" class="screen active" aria-labelledby="setup-title">
+  <header class="brand">
+    <img src="icons/icon-192.png" alt="" width="40" height="40">
+    <div>
+      <h1 id="setup-title">Brika Camera</h1>
+      <p>Straight, cropped panel photos for the Designer</p>
+    </div>
+  </header>
+
+  <form id="setup-form" class="card" autocomplete="off">
+    <label class="field">
+      <span>Panel name</span>
+      <input id="panel-name" name="panel" required maxlength="60" placeholder="e.g. Flexo 160 – main cabinet" enterkeyhint="next">
+      <small>Every photo is saved with this name.</small>
+    </label>
+
+    <fieldset class="field">
+      <legend>What are you photographing?</legend>
+      <div class="segmented" role="radiogroup">
+        <label><input type="radio" name="mode" value="panel" checked><span>Whole panel</span></label>
+        <label><input type="radio" name="mode" value="label"><span>Label close-up</span></label>
+      </div>
+    </fieldset>
+
+    <fieldset class="field" id="size-field">
+      <legend>Plate size in mm <em>(optional)</em></legend>
+      <div class="size-row">
+        <input id="plate-w" type="number" inputmode="numeric" min="50" max="5000" placeholder="Width">
+        <span aria-hidden="true">×</span>
+        <input id="plate-h" type="number" inputmode="numeric" min="50" max="5000" placeholder="Height">
+      </div>
+      <small>From the drawing or a tape measure. Gives the photo exact proportions; without it the app estimates them.</small>
+    </fieldset>
+
+    <label class="check"><input id="keep-original" type="checkbox"><span>Also save the uncropped photo</span></label>
+    <label class="check"><input id="hi-res" type="checkbox"><span>Highest camera resolution (slower)</span></label>
+
+    <button class="primary big" type="submit">Start camera</button>
+    <p id="setup-error" class="error" role="alert" hidden></p>
+  </form>
+
+  <details class="card tips">
+    <summary>Tips for good panel photos</summary>
+    <ul>
+      <li><strong>Safety first:</strong> follow your site rules; don't open or remove covers on live equipment just for a photo.</li>
+      <li>Open the door fully and stand in front of the <em>middle</em> of the plate.</li>
+      <li>Hold the phone upright and follow the green level dot.</li>
+      <li>Let the plate fill the screen but keep a small border so all 4 corners show.</li>
+      <li>No flash: it makes glare on covers and duct lids. Use the torch button or room light.</li>
+      <li>Glare on a cover? Step a little to the side: the app straightens the angle afterwards.</li>
+      <li>Wipe the lens; a fingerprint makes every photo soft.</li>
+      <li>After the whole panel, switch to <em>Label close-up</em> for nameplates you want to read later.</li>
+    </ul>
+  </details>
+
+  <section class="card" id="saved-card" hidden>
+    <h2>Saved this session</h2>
+    <ul id="saved-list" class="saved"></ul>
+    <p class="muted small">Photos go to the phone's <strong>Download</strong> folder and show up in the Gallery (album “Download”).</p>
+  </section>
+</section>
+
+<!-- 2. Camera with live guidance -->
+<section id="camera" class="screen" aria-label="Camera">
+  <div class="topbar">
+    <button id="cam-back" class="icon" aria-label="Back to setup">←</button>
+    <div class="topinfo">
+      <strong id="cam-panel"></strong>
+      <span id="level-readout" class="muted">Level: –</span>
+    </div>
+    <input id="cam-tag" class="tag-input" placeholder="Tag, e.g. QF2" maxlength="30" autocomplete="off" hidden>
+  </div>
+  <div id="cam-stage" class="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <canvas id="overlay"></canvas>
+    <div id="hint" class="hint" aria-live="polite">Starting camera…</div>
+    <button id="switch-outline" class="chip floating" hidden>Switch outline</button>
+    <div id="flash" class="flash"></div>
+  </div>
+  <div class="bottombar">
+    <button id="auto-toggle" class="toggle on" aria-pressed="true"><span>Auto</span><small>capture</small></button>
+    <button id="shutter" class="shutter" aria-label="Take photo"><svg viewBox="0 0 80 80"><circle class="ring-bg" cx="40" cy="40" r="36"/><circle id="shutter-progress" class="ring" cx="40" cy="40" r="36"/><circle class="dot" cx="40" cy="40" r="28"/></svg></button>
+    <button id="torch" class="toggle" aria-pressed="false" hidden><span>Light</span><small>off</small></button>
+    <span id="torch-spacer" class="toggle-spacer"></span>
+  </div>
+</section>
+
+<!-- 3. Review: adjust the 4 corners -->
+<section id="review" class="screen" aria-label="Adjust corners">
+  <div class="topbar">
+    <button id="review-retake" class="icon" aria-label="Retake">←</button>
+    <div class="topinfo"><strong>Check the corners</strong><span class="muted">Drag a corner onto the plate corner</span></div>
+  </div>
+  <div id="review-stage" class="stage">
+    <canvas id="review-canvas"></canvas>
+    <canvas id="loupe" class="loupe" width="150" height="150" hidden></canvas>
+  </div>
+  <div class="bottombar actions">
+    <button id="review-next" class="secondary">Other outline</button>
+    <button id="review-full" class="secondary">Whole photo</button>
+    <button id="review-ok" class="primary">Straighten</button>
+  </div>
+</section>
+
+<!-- 4. Result: checks and save -->
+<section id="result" class="screen" aria-label="Result">
+  <div class="topbar">
+    <button id="result-back" class="icon" aria-label="Adjust corners">←</button>
+    <div class="topinfo"><strong>Result</strong><span id="result-size" class="muted"></span></div>
+  </div>
+  <div class="stage result-stage">
+    <canvas id="result-canvas"></canvas>
+    <div id="busy" class="busy" hidden><div class="spinner"></div><p>Straightening…</p></div>
+  </div>
+  <div class="result-panel">
+    <ul id="checks" class="checks"></ul>
+    <label class="field compact"><span>File name</span><input id="file-name" autocomplete="off"></label>
+    <div class="actions">
+      <button id="result-retake" class="secondary">Retake</button>
+      <button id="result-share" class="secondary" hidden>Share…</button>
+      <button id="result-save" class="primary">Save to phone</button>
+    </div>
+  </div>
+</section>
+
+<div id="toast" class="toast" role="status" hidden></div>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

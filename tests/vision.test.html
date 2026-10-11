@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vision tests</title>
+<style>body{font:14px system-ui;background:#fff;color:#111;margin:16px} .fail{color:#b00} .pass{color:#070}</style>
+</head>
+<body>
+<h1>Brika Camera – vision tests</h1>
+<p>Run <code>python tests/make_scenes.py tests/scenes</code> first, then serve the folder and open this page.</p>
+<pre id="log"></pre>
+<script type="module">
+import { findPanels, warp, estimateAspect, photoQuality, framingAdvice, levelFromGravity, toGray, homography, applyH, cornerDistance } from '../js/vision.js';
+
+const log = document.getElementById('log');
+const results = [];
+function check(name, ok, detail = '') {
+  results.push({ name, ok, detail });
+  const line = document.createElement('div');
+  line.className = ok ? 'pass' : 'fail';
+  line.textContent = `${ok ? 'PASS' : 'FAIL'}  ${name}  ${detail}`;
+  log.appendChild(line);
+}
+
+async function load(url) {
+  const img = new Image();
+  img.src = url;
+  await img.decode();
+  return img;
+}
+
+function pixels(img, maxSide) {
+  const s = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+  const w = Math.round(img.naturalWidth * s), h = Math.round(img.naturalHeight * s);
+  const c = new OffscreenCanvas(w, h);
+  const x = c.getContext('2d', { willReadFrequently: true });
+  x.drawImage(img, 0, 0, w, h);
+  return { data: x.getImageData(0, 0, w, h).data, w, h };
+}
+
+const truth = await (await fetch('scenes/truth.json')).json();
+for (const [name, t] of Object.entries(truth)) {
+  const img = await load(`scenes/${name}.png`);
+  const small = pixels(img, 320);
+  const t0 = performance.now();
+  const quads = findPanels(toGray(small.data, small.w, small.h), small.w, small.h);
+  const ms = performance.now() - t0;
+  const want = t.corners.map(([x, y]) => [x / t.size[0], y / t.size[1]]);
+  const best = quads[0];
+  if (name === 'too_close') {
+    const advice = framingAdvice(best || null, null, small.w / small.h);
+    check(`${name}: asks to step back`, !best || advice.tips.some(x => /Step back/.test(x.text)), JSON.stringify(advice.tips.map(x => x.text)));
+    continue;
+  }
+  const d = best ? cornerDistance(best.corners, want) : 1;
+  check(`${name}: plate found`, d < 0.02, `corner error ${(d * 100).toFixed(1)}%  ${quads.length} candidates  ${ms.toFixed(0)} ms`);
+  if (!best) continue;
+  const full = pixels(img, 4000);
+  const px = best.corners.map(([x, y]) => [x * full.w, y * full.h]);
+  const aspect = estimateAspect(px, full.w, full.h);
+  if (name !== 'glare_blur')
+    check(`${name}: plate shape`, Math.abs(aspect / t.plate_aspect - 1) < 0.08, `estimated ${aspect.toFixed(3)} true ${t.plate_aspect.toFixed(3)}`);
+  const outH = 600, outW = Math.round(outH * aspect);
+  const out = warp(full.data, full.w, full.h, px, outW, outH);
+  const q = photoQuality(out, outW, outH);
+  if (name === 'glare_blur') {
+    check(`${name}: blur noticed`, q.verdicts.sharp !== 'good', `sharpness ${q.sharpness.toFixed(0)}`);
+    check(`${name}: glare noticed`, q.verdicts.glare !== 'good', `glare ${(q.glare * 100).toFixed(1)}%`);
+  } else {
+    check(`${name}: sharp and no glare`, q.verdicts.sharp === 'good' && q.verdicts.glare === 'good', `sharpness ${q.sharpness.toFixed(0)} glare ${(q.glare * 100).toFixed(2)}%`);
+  }
+  const advice = framingAdvice(best, null, small.w / small.h);
+  if (name === 'frontal') check(`${name}: framing good`, advice.status === 'good', JSON.stringify(advice.tips.map(x => x.text)));
+  if (name === 'from_left') check(`${name}: says move right`, advice.tips.some(x => /right/.test(x.text)), JSON.stringify(advice.tips.map(x => x.text)));
+}
+
+// Homography round trip.
+const H = homography([[0, 0], [1, 0], [1, 1], [0, 1]], [[10, 20], [110, 25], [105, 140], [5, 130]]);
+const p = applyH(H, 1, 1);
+check('homography maps corners', Math.abs(p[0] - 105) < 1e-6 && Math.abs(p[1] - 140) < 1e-6);
+
+// Tilt: upright phone, leaning back 10° (top away) and turned clockwise 5°.
+const g = 9.81, r = Math.PI / 180;
+let L = levelFromGravity(0, g * Math.cos(10 * r), g * Math.sin(10 * r), 0);
+check('level: pitch from lean', Math.abs(L.pitch - 10) < 0.5 && !L.flat, JSON.stringify(L));
+L = levelFromGravity(-g * Math.sin(5 * r), g * Math.cos(5 * r), 0, 0);
+check('level: roll clockwise', Math.abs(L.roll - 5) < 0.5, JSON.stringify(L));
+L = levelFromGravity(g, 0, 0, 90);            // landscape, held straight
+check('level: landscape upright', Math.abs(L.roll) < 0.5 && Math.abs(L.pitch) < 0.5, JSON.stringify(L));
+L = levelFromGravity(0, 0.3, g, 0);
+check('level: flat mode', L.flat && L.pitch < 3, JSON.stringify(L));
+const adv = framingAdvice({ corners: [[.1, .1], [.9, .1], [.9, .9], [.1, .9]], area: .64 }, { available: true, pitch: 10, roll: 0 }, 1);
+check('advice: lean back → tilt toward you', adv.tips.some(t => /toward you/.test(t.text)), JSON.stringify(adv.tips));
+
+window.testResults = results;
+document.title = results.every(x => x.ok) ? 'ALL PASSED' : 'FAILED';
+</script>
+</body>
+</html>
