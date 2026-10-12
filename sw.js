@@ -1,6 +1,6 @@
 // Offline cache: the app works in a cabinet room without signal once it was opened online.
 // Bump VERSION whenever a file changes so phones pick up the new version.
-const VERSION = 'brika-camera-v1';
+const VERSION = 'brika-camera-v3';
 const FILES = ['./', 'index.html', 'app.css', 'js/app.js', 'js/vision.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png'];
 

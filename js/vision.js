@@ -291,26 +291,41 @@ export function applyH(H, x, y) {
 export function warp(src, sw, sh, cornersPx, outW, outH) {
   const H = homography([[0, 0], [outW - 1, 0], [outW - 1, outH - 1], [0, outH - 1]], cornersPx);
   const out = new Uint8ClampedArray(outW * outH * 4);
+  // When the plate covers more photo pixels than the output has, average several samples per
+  // output pixel (anti-aliasing) instead of skipping pixels, which looks grainy and jagged.
+  const side = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+  const srcW = (side(cornersPx[0], cornersPx[1]) + side(cornersPx[3], cornersPx[2])) / 2;
+  const srcH = (side(cornersPx[0], cornersPx[3]) + side(cornersPx[1], cornersPx[2])) / 2;
+  const n = Math.max(1, Math.min(4, Math.ceil(Math.max(srcW / outW, srcH / outH) - 0.15)));
+  const offsets = [];
+  for (let a = 0; a < n; a++) for (let b = 0; b < n; b++) offsets.push([(a + 0.5) / n - 0.5, (b + 0.5) / n - 0.5]);
+  const inv = 1 / offsets.length;
+  // Outside the photo (a corner dragged past the edge): plain dark grey, not smeared edge pixels.
+  const FILL = 30;
   for (let v = 0; v < outH; v++) {
-    // Walk along the row with incremental numerators/denominator.
-    let nx = H[1] * v + H[2], ny = H[4] * v + H[5], d = H[7] * v + H[8];
     let o = v * outW * 4;
-    for (let u = 0; u < outW; u++, o += 4, nx += H[0], ny += H[3], d += H[6]) {
-      const x = nx / d, y = ny / d;
-      const x0 = Math.floor(x), y0 = Math.floor(y);
-      if (x0 < 0 || y0 < 0 || x0 >= sw - 1 || y0 >= sh - 1) {
-        const xc = Math.min(sw - 1, Math.max(0, Math.round(x))), yc = Math.min(sh - 1, Math.max(0, Math.round(y)));
-        const i = (yc * sw + xc) * 4;
-        out[o] = src[i]; out[o + 1] = src[i + 1]; out[o + 2] = src[i + 2]; out[o + 3] = 255;
-        continue;
+    for (let u = 0; u < outW; u++, o += 4) {
+      let r = 0, g = 0, bl = 0;
+      for (const [du, dv] of offsets) {
+        const uu = u + du, vv = v + dv;
+        const d = H[6] * uu + H[7] * vv + H[8];
+        const x = (H[0] * uu + H[1] * vv + H[2]) / d, y = (H[3] * uu + H[4] * vv + H[5]) / d;
+        const x0 = Math.floor(x), y0 = Math.floor(y);
+        if (x0 < 0 || y0 < 0 || x0 >= sw - 1 || y0 >= sh - 1) {
+          if (x < -0.5 || y < -0.5 || x > sw - 0.5 || y > sh - 0.5) { r += FILL; g += FILL; bl += FILL; continue; }
+          const xc = Math.min(sw - 1, Math.max(0, Math.round(x))), yc = Math.min(sh - 1, Math.max(0, Math.round(y)));
+          const i = (yc * sw + xc) * 4;
+          r += src[i]; g += src[i + 1]; bl += src[i + 2];
+          continue;
+        }
+        const fx = x - x0, fy = y - y0;
+        const i = (y0 * sw + x0) * 4, j = i + sw * 4;
+        const w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy), w01 = (1 - fx) * fy, w11 = fx * fy;
+        r += src[i] * w00 + src[i + 4] * w10 + src[j] * w01 + src[j + 4] * w11;
+        g += src[i + 1] * w00 + src[i + 5] * w10 + src[j + 1] * w01 + src[j + 5] * w11;
+        bl += src[i + 2] * w00 + src[i + 6] * w10 + src[j + 2] * w01 + src[j + 6] * w11;
       }
-      const fx = x - x0, fy = y - y0;
-      const i = (y0 * sw + x0) * 4, j = i + sw * 4;
-      const w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy), w01 = (1 - fx) * fy, w11 = fx * fy;
-      out[o] = src[i] * w00 + src[i + 4] * w10 + src[j] * w01 + src[j + 4] * w11;
-      out[o + 1] = src[i + 1] * w00 + src[i + 5] * w10 + src[j + 1] * w01 + src[j + 5] * w11;
-      out[o + 2] = src[i + 2] * w00 + src[i + 6] * w10 + src[j + 2] * w01 + src[j + 6] * w11;
-      out[o + 3] = 255;
+      out[o] = r * inv; out[o + 1] = g * inv; out[o + 2] = bl * inv; out[o + 3] = 255;
     }
   }
   return out;

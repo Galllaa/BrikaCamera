@@ -49,9 +49,15 @@
     </fieldset>
 
     <label class="check"><input id="keep-original" type="checkbox"><span>Also save the uncropped photo</span></label>
-    <label class="check"><input id="hi-res" type="checkbox"><span>Highest camera resolution (slower)</span></label>
+    <label class="check"><input id="hi-res" type="checkbox"><span>Full-resolution photo (recommended)</span></label>
 
     <button class="primary big" type="submit">Start camera</button>
+    <p class="or-line"><span>Best picture quality</span></p>
+    <button id="native-camera" class="secondary big" type="button">Take it with the phone's camera app</button>
+    <button id="pick-photo" class="secondary big" type="button">Straighten a photo from the gallery</button>
+    <small class="muted small">The phone's own camera app uses night mode, HDR and noise reduction. The photo comes back here to be straightened, cropped and named.</small>
+    <input id="native-input" type="file" accept="image/*" capture="environment" hidden>
+    <input id="gallery-input" type="file" accept="image/*" hidden>
     <p id="setup-error" class="error" role="alert" hidden></p>
   </form>
 
@@ -84,6 +90,7 @@
       <strong id="cam-panel"></strong>
       <span id="level-readout" class="muted">Level: –</span>
     </div>
+    <button id="cam-switch" class="icon" aria-label="Switch camera" title="Switch camera" hidden>⟳</button>
     <input id="cam-tag" class="tag-input" placeholder="Tag, e.g. QF2" maxlength="30" autocomplete="off" hidden>
   </div>
   <div id="cam-stage" class="stage">

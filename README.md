@@ -27,6 +27,12 @@ After the first start it also works without signal (offline cache).
 
 ## Using it
 
+**Best picture quality:** on the first screen use **Take it with the phone's camera app** (or
+**Straighten a photo from the gallery** for a photo you already took). The phone's own camera uses
+night mode, HDR and noise reduction, which a web page can't; the photo then comes back to this app
+for corners, straightening and the file name. The app's own camera (*Start camera*) gives the
+level and live outline, and now takes a full-resolution still by default instead of a video frame.
+
 1. **Panel name** – every photo is saved as `Panel name_01.jpg`, `_02`, …
    With the plate size filled in: `Panel name_600x1200mm_01.jpg`.
 2. **Whole panel** or **Label close-up** (for nameplates; type the tag, e.g. `QF2`, on the

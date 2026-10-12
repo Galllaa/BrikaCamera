@@ -15,9 +15,12 @@ const store = {
   get(key, fallback) { try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); } catch { return fallback; } },
   set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode */ } },
 };
-const settings = Object.assign({ panel: '', mode: 'panel', widthMm: '', heightMm: '', keepOriginal: false, hiRes: false, auto: true, tag: '' },
+const settings = Object.assign({ cameraId: '', panel: '', mode: 'panel', widthMm: '', heightMm: '', keepOriginal: false, hiRes: false, auto: true, tag: '' },
   store.get('brika-camera-settings', {}));
 const saveSettings = () => store.set('brika-camera-settings', settings);
+// v3: full-resolution stills are the default (video frames are small and noisy).
+if (!settings.v3) { settings.hiRes = true; settings.v3 = true; saveSettings(); }
+let photoSource = 'live';          // live = this app's camera, native = phone camera app, gallery = existing photo
 
 // ---------------- screens ----------------
 function show(id) {
@@ -43,8 +46,7 @@ const syncMode = () => { $('size-field').hidden = form.elements.mode.value !== '
 form.addEventListener('change', syncMode);
 syncMode();
 
-form.addEventListener('submit', async e => {
-  e.preventDefault();
+function readSetup() {
   settings.panel = $('panel-name').value.trim();
   settings.mode = form.elements.mode.value;
   const w = parseFloat($('plate-w').value), h = parseFloat($('plate-h').value);
@@ -53,8 +55,15 @@ form.addEventListener('submit', async e => {
   settings.keepOriginal = $('keep-original').checked;
   settings.hiRes = $('hi-res').checked;
   saveSettings();
-  if (!settings.panel) { $('panel-name').focus(); return; }
+  if (!settings.panel) { $('panel-name').reportValidity?.(); $('panel-name').focus(); return false; }
   $('setup-error').hidden = true;
+  return true;
+}
+
+form.addEventListener('submit', async e => {
+  e.preventDefault();
+  if (!readSetup()) return;
+  photoSource = 'live';
   try {
     await openCamera();
   } catch (err) {
@@ -85,22 +94,45 @@ let tracked = null, pending = null, candidates = [], preferred = null, misses = 
 let goodSince = 0, advice = { status: 'bad', tips: [] };
 let videoBox = { x: 0, y: 0, w: 1, h: 1 };
 
-async function openCamera() {
-  if (!stream) {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } },
-    });
-    track = stream.getVideoTracks()[0];
-    video.srcObject = stream;
-    const caps = track.getCapabilities ? track.getCapabilities() : {};
-    $('torch').hidden = !caps.torch;
-    $('torch-spacer').hidden = !!caps.torch;
-    if (caps.focusMode && caps.focusMode.includes('continuous')) {
-      track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
-    }
-    imageCapture = 'ImageCapture' in window ? new ImageCapture(track) : null;
+let backCameras = [], lowRes = false;
+
+async function openStream() {
+  const size = lowRes ? { width: { ideal: 1920 }, height: { ideal: 1080 } } : { width: { ideal: 3840 }, height: { ideal: 2160 } };
+  const video_ = settings.cameraId
+    ? { deviceId: { exact: settings.cameraId }, ...size }
+    : { facingMode: { ideal: 'environment' }, ...size };
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: video_ });
+  } catch (err) {
+    if (!settings.cameraId || err?.name === 'NotAllowedError') throw err;
+    settings.cameraId = ''; saveSettings();          // that camera is gone: fall back to the default one
+    return openStream();
   }
+  track = stream.getVideoTracks()[0];
+  video.srcObject = stream;
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  $('torch').hidden = !caps.torch;
+  $('torch-spacer').hidden = !!caps.torch;
+  showTorch(false);
+  if (caps.focusMode && caps.focusMode.includes('continuous')) {
+    track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
+  }
+  imageCapture = 'ImageCapture' in window ? new ImageCapture(track) : null;
+  await listBackCameras();
+}
+
+// Phones have several back cameras (main, wide, zoom); only some have the light next to them.
+async function listBackCameras() {
+  try {
+    const all = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+    const back = all.filter(d => /back|rear|environment/i.test(d.label));
+    backCameras = back.length ? back : all;
+  } catch { backCameras = []; }
+  $('cam-switch').hidden = backCameras.length < 2;
+}
+
+async function openCamera() {
+  if (!stream) await openStream();
   $('cam-panel').textContent = settings.panel;
   $('cam-tag').hidden = settings.mode !== 'label';
   $('cam-tag').value = settings.tag || '';
@@ -146,14 +178,58 @@ $('auto-toggle').addEventListener('click', () => {
   $('auto-toggle').setAttribute('aria-pressed', String(settings.auto));
   goodSince = 0;
 });
+function showTorch(on) {
+  $('torch').setAttribute('aria-pressed', String(on));
+  $('torch').classList.toggle('on', on);
+  $('torch').querySelector('small').textContent = on ? 'on' : 'off';
+}
+
+async function trySetTorch(on) {
+  // Chrome on some phones only accepts the light after the photo settings were read once.
+  if (imageCapture) { try { await imageCapture.getPhotoCapabilities(); } catch { /* ignore */ } }
+  for (const c of [{ advanced: [{ torch: on }] }, { torch: on }]) {
+    try {
+      await track.applyConstraints(c);
+      const now = track.getSettings ? track.getSettings().torch : undefined;
+      if (now === undefined || now === on) return true;
+    } catch { /* try the next form */ }
+  }
+  return false;
+}
+
 $('torch').addEventListener('click', async () => {
+  if (!track) return;
   const on = $('torch').getAttribute('aria-pressed') !== 'true';
+  if (await trySetTorch(on)) { showTorch(on); return; }
+  if (on && !lowRes) {
+    // Some phones can only light the torch at Full HD: restart the camera smaller and try again.
+    lowRes = true;
+    stream.getTracks().forEach(t => t.stop());
+    await openStream(); await video.play().catch(() => {}); layoutVideo();
+    if (await trySetTorch(true)) { showTorch(true); toast('Light on (camera switched to Full HD for this).'); return; }
+    lowRes = false;
+    stream.getTracks().forEach(t => t.stop());
+    await openStream(); await video.play().catch(() => {}); layoutVideo();
+  }
+  toast(backCameras.length > 1
+    ? 'This camera cannot use the light. Tap the camera button (top right) to try another back camera.'
+    : 'Chrome cannot switch the light on for this camera. Use the cabinet light or a lamp.', 5000);
+});
+
+$('cam-switch').addEventListener('click', async () => {
+  if (backCameras.length < 2) return;
+  const current = track?.getSettings ? track.getSettings().deviceId : settings.cameraId;
+  const i = backCameras.findIndex(d => d.deviceId === current);
+  const next = backCameras[(i + 1) % backCameras.length];
+  settings.cameraId = next.deviceId; saveSettings();
+  stream?.getTracks().forEach(t => t.stop());
+  lowRes = false;
   try {
-    await track.applyConstraints({ advanced: [{ torch: on }] });
-    $('torch').setAttribute('aria-pressed', String(on));
-    $('torch').classList.toggle('on', on);
-    $('torch').querySelector('small').textContent = on ? 'on' : 'off';
-  } catch { toast('The light cannot be switched on from the browser on this phone.'); }
+    await openStream(); await video.play().catch(() => {}); layoutVideo();
+    tracked = null; candidates = [];
+    toast(`Camera ${backCameras.findIndex(d => d.deviceId === next.deviceId) + 1} of ${backCameras.length}` +
+      ($('torch').hidden ? ' (no light)' : ' (has light)'), 2000);
+  } catch (err) { toast(cameraErrorText(err)); }
 });
 $('switch-outline').addEventListener('click', () => {
   if (candidates.length < 2) return;
@@ -359,7 +435,14 @@ function drawLevel(level, W, H) {
 async function grabPhoto() {
   if (settings.hiRes && imageCapture) {
     try {
-      const blob = await imageCapture.takePhoto();
+      // Ask for the sensor's full still size; the default is often only the preview size.
+      let options = {};
+      try {
+        const caps = await imageCapture.getPhotoCapabilities();
+        if (caps?.imageWidth?.max && caps?.imageHeight?.max) options = { imageWidth: caps.imageWidth.max, imageHeight: caps.imageHeight.max };
+        if (caps?.fillLightMode?.includes?.('off')) options.fillLightMode = 'off';
+      } catch { /* older Chrome: default size */ }
+      const blob = await imageCapture.takePhoto(options);
       const bmp = await createImageBitmap(blob);
       const portraitVideo = video.videoHeight > video.videoWidth, portraitPhoto = bmp.height > bmp.width;
       if (portraitVideo === portraitPhoto) return bmp;
@@ -378,28 +461,8 @@ async function capture() {
   try {
     const live = tracked ? tracked.corners : null;
     const bmp = await grabPhoto();
-    const scale = Math.min(1, 6000 / Math.max(bmp.width, bmp.height));
-    const photo = document.createElement('canvas');
-    photo.width = Math.round(bmp.width * scale); photo.height = Math.round(bmp.height * scale);
-    photo.getContext('2d').drawImage(bmp, 0, 0, photo.width, photo.height);
-    bmp.close?.();
-    // Find the plate again on the photo itself (it can be framed a little differently from the preview).
-    let photoCands = [];
-    if (settings.mode === 'panel') {
-      const s = DETECT_SIDE / Math.max(photo.width, photo.height);
-      const w = Math.round(photo.width * s), h = Math.round(photo.height * s);
-      const c = document.createElement('canvas'); c.width = w; c.height = h;
-      const cx = c.getContext('2d', { willReadFrequently: true }); cx.drawImage(photo, 0, 0, w, h);
-      photoCands = findPanels(toGray(cx.getImageData(0, 0, w, h).data, w, h), w, h);
-    }
-    let corners;
-    if (settings.mode === 'label') corners = labelGuide();
-    else if (live && photoCands.length) {
-      const near = photoCands.map(c => [cornerDistance(c.corners, live), c]).sort((a, b) => a[0] - b[0])[0];
-      corners = near[0] < 0.06 ? near[1].corners : live;
-    } else corners = live || photoCands[0]?.corners || [[0.08, 0.08], [0.92, 0.08], [0.92, 0.92], [0.08, 0.92]];
     running = false;
-    openReview(photo, corners.map(p => [...p]), photoCands.map(c => c.corners));
+    reviewPhoto(bmp, live);
   } catch (err) {
     toast(`Could not take the photo (${err?.name || err}).`);
     busy = false;
@@ -407,10 +470,77 @@ async function capture() {
   }
 }
 
+// Photo (from this camera, the phone's camera app or the gallery) → find the plate → corners screen.
+function reviewPhoto(bmp, live = null) {
+  const scale = Math.min(1, 6000 / Math.max(bmp.width, bmp.height));
+  const photo = document.createElement('canvas');
+  photo.width = Math.round(bmp.width * scale); photo.height = Math.round(bmp.height * scale);
+  const pctx = photo.getContext('2d');
+  pctx.imageSmoothingQuality = 'high';
+  pctx.drawImage(bmp, 0, 0, photo.width, photo.height);
+  bmp.close?.();
+  // Find the plate again on the photo itself (it can be framed a little differently from the preview).
+  let photoCands = [];
+  if (settings.mode === 'panel') {
+    const s = DETECT_SIDE / Math.max(photo.width, photo.height);
+    const w = Math.round(photo.width * s), h = Math.round(photo.height * s);
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const cx = c.getContext('2d', { willReadFrequently: true });
+    cx.imageSmoothingQuality = 'high';
+    cx.drawImage(photo, 0, 0, w, h);
+    photoCands = findPanels(toGray(cx.getImageData(0, 0, w, h).data, w, h), w, h);
+  }
+  let corners;
+  if (settings.mode === 'label') corners = photoSource === 'live' ? labelGuide() : [[0.04, 0.04], [0.96, 0.04], [0.96, 0.96], [0.04, 0.96]];
+  else if (live && photoCands.length) {
+    const near = photoCands.map(c => [cornerDistance(c.corners, live), c]).sort((a, b) => a[0] - b[0])[0];
+    corners = near[0] < 0.06 ? near[1].corners : live;
+  } else if (live) corners = live;
+  else if (photoSource !== 'live') {
+    // A photo from the camera app or gallery: use a found plate only if it fills a good part of the
+    // photo; a small rectangle is usually one row of devices in an already close-up photo.
+    const big = photoCands.find(c => polygonArea(c.corners) >= 0.3);
+    corners = big ? big.corners : [[0, 0], [1, 0], [1, 1], [0, 1]];
+  } else corners = photoCands[0]?.corners || [[0.08, 0.08], [0.92, 0.08], [0.92, 0.92], [0.08, 0.92]];
+  $('toast').hidden = true;
+  openReview(photo, corners.map(p => [...p]), photoCands.map(c => c.corners));
+}
+
+// The phone's own camera app (night mode, HDR, noise reduction) or a photo already in the gallery.
+async function openPhotoFile(file) {
+  if (!file) return;
+  $('setup-error').hidden = true;
+  toast('Opening the photo…', 2000);
+  try {
+    const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    stopCamera();
+    reviewPhoto(bmp, null);
+  } catch (err) {
+    $('setup-error').textContent = `Could not open that photo (${err?.name || err}).`;
+    $('setup-error').hidden = false;
+    show('setup');
+  }
+}
+$('native-camera').addEventListener('click', () => {
+  if (!readSetup()) return;
+  photoSource = 'native';
+  $('native-input').value = '';
+  $('native-input').click();
+});
+$('pick-photo').addEventListener('click', () => {
+  if (!readSetup()) return;
+  photoSource = 'gallery';
+  $('gallery-input').value = '';
+  $('gallery-input').click();
+});
+$('native-input').addEventListener('change', e => openPhotoFile(e.target.files?.[0]));
+$('gallery-input').addEventListener('change', e => openPhotoFile(e.target.files?.[0]));
+
 // ---------------- review: corners ----------------
 const rcanvas = $('review-canvas');
 const rctx = rcanvas.getContext('2d');
 const loupe = $('loupe');
+
 const lctx = loupe.getContext('2d');
 let reviewState = null;
 
@@ -494,7 +624,7 @@ function moveCorner(e) {
   lctx.beginPath(); lctx.moveTo(75, 55); lctx.lineTo(75, 95); lctx.moveTo(55, 75); lctx.lineTo(95, 75); lctx.stroke();
 }
 
-$('review-retake').addEventListener('click', backToCamera);
+$('review-retake').addEventListener('click', retake);
 $('review-next').addEventListener('click', () => {
   const alts = reviewState.alternatives;
   if (alts.length < 2) return;
@@ -508,8 +638,17 @@ $('review-full').addEventListener('click', () => {
 });
 $('review-ok').addEventListener('click', () => straighten());
 
+// "Retake" goes back to where the photo came from. Opening the phone's camera app needs the tap itself,
+// so after saving a native/gallery photo the app returns to the first screen instead.
+function retake() {
+  if (photoSource === 'native') { reviewState = null; resultState = null; show('setup'); $('native-input').value = ''; $('native-input').click(); return; }
+  if (photoSource === 'gallery') { reviewState = null; resultState = null; show('setup'); $('gallery-input').value = ''; $('gallery-input').click(); return; }
+  backToCamera();
+}
+
 async function backToCamera() {
   reviewState = null; resultState = null;
+  if (photoSource !== 'live') { show('setup'); return; }
   if (stream && stream.active) {
     show('camera'); busy = false; $('shutter').disabled = false; running = true; goodSince = 0;
     layoutVideo(); requestAnimationFrame(tick);
@@ -576,7 +715,7 @@ function renderChecks() {
   if (settings.mode === 'panel') {
     const longSide = Math.max(outW, outH);
     items.push({ level: longSide >= 1800 ? 'good' : longSide >= 1200 ? 'warn' : 'bad', title: longSide >= 1800 ? 'Enough detail' : 'Low detail',
-      help: longSide >= 1800 ? '' : 'Move closer so the plate fills more of the screen, or turn on highest resolution.' });
+      help: longSide >= 1800 ? '' : 'Move closer so the plate fills more of the screen, or use the phone\'s camera app (first screen).' });
     items.push({ level: fromMm ? 'good' : 'warn', title: fromMm ? 'Exact proportions from the plate size' : 'Proportions estimated',
       help: fromMm ? '' : 'Enter the plate size in mm on the first screen for exact proportions.' });
   }
@@ -606,7 +745,7 @@ function suggestName() {
 }
 
 function canvasBlob(canvas) {
-  return new Promise((resolve, reject) => canvas.toBlob(b => (b ? resolve(b) : reject(new Error('encode'))), 'image/jpeg', 0.92));
+  return new Promise((resolve, reject) => canvas.toBlob(b => (b ? resolve(b) : reject(new Error('encode'))), 'image/jpeg', 0.95));
 }
 
 function download(blob, name) {
@@ -642,7 +781,7 @@ $('result-share').addEventListener('click', async () => {
   if (!navigator.canShare?.({ files: [file] })) { toast('Sharing files is not supported here.'); return; }
   try { await navigator.share({ files: [file], title: name }); bumpNumber(); addSaved(name); } catch { /* cancelled */ }
 });
-$('result-retake').addEventListener('click', backToCamera);
+$('result-retake').addEventListener('click', retake);
 $('result-back').addEventListener('click', () => { resultState = null; show('review'); requestAnimationFrame(drawReview); });
 
 function addSaved(name) {
@@ -669,4 +808,4 @@ document.addEventListener('visibilitychange', async () => {
 });
 
 // For automated tests.
-window.__brikaCamera = { settings, get tracked() { return tracked; }, get advice() { return advice; }, capture };
+window.__brikaCamera = { settings, get tracked() { return tracked; }, get advice() { return advice; }, capture, review: () => reviewState?.corners };
